@@ -1,9 +1,15 @@
 name = "Jsubmit"
 uuid = "4fec4833-94a8-4ec6-b1ec-1b26e595b69f"
-authors = ["Steffen Schultze"]
 version = "1.0.0-DEV"
+authors = ["Steffen Schultze"]
+
+[deps]
+Dates = "ade2ca70-3891-5945-98fb-dc099432e06a"
+JLD2 = "033835bb-8acc-5ee8-8aae-3f567f8a3819"
 
 [compat]
+Dates = "1.11.0"
+JLD2 = "0.6.3"
 julia = "1.10.10"
 
 [extras]
