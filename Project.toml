@@ -1,0 +1,13 @@
+name = "Jsubmit"
+uuid = "4fec4833-94a8-4ec6-b1ec-1b26e595b69f"
+authors = ["Steffen Schultze"]
+version = "1.0.0-DEV"
+
+[compat]
+julia = "1.10.10"
+
+[extras]
+Test = "8dfed614-e22c-5e08-85e1-65c5234f0b40"
+
+[targets]
+test = ["Test"]
