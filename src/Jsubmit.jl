@@ -2,11 +2,11 @@ module Jsubmit
 
 using JLD2, Dates
 
-function export_job(path, func, args, kwargs; writejld2 = true, submit = nothing, jobkwargs...)
+function export_job(path, func, args, kwargs; metadata = nothing, writejld2 = true, submit = nothing, jobkwargs...)
     jobname = splitdir(path)[2]
 
     export_jobscript("$path.sh", jobname, func; jobkwargs...)
-    writejld2 && jldsave("$path.jld2"; args, kwargs)
+    writejld2 && jldsave("$path.jld2"; args, kwargs, metadata)
     if !isnothing(submit)
         dir = abspath(splitdir(path)[1])
         cmd = if submit == "owl"
@@ -48,7 +48,7 @@ end
 function jobscript(jobname, jobfunc; 
         narray = nothing, nconcurrent = 1, 
         exclusive = true, partition = "short,p40,p32,p16", 
-        ngpus = 1, gputype = "", 
+        ngpus = 0, gputype = "", 
     )
     array = isnothing(narray) ? "" : "\n#SBATCH --array=1-$(narray)%$(nconcurrent)"
 
