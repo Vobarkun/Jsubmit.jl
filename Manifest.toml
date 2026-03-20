@@ -1,8 +1,8 @@
 # This file is machine-generated - editing it directly is not advised
 
-julia_version = "1.12.4"
+julia_version = "1.12.5"
 manifest_format = "2.0"
-project_hash = "556273c8a2c6785b6c013c7190790d7c969b5c2e"
+project_hash = "96d7017e69296c5e923f4cb24b3e6165cc3b797c"
 
 [[deps.ArgTools]]
 uuid = "0dad84c5-d112-42e6-8d28-ef12dabb789f"
@@ -88,7 +88,7 @@ uuid = "692b3bcd-3c85-4b1f-b108-f13ce0eb3210"
 version = "1.7.1"
 
 [[deps.Jsubmit]]
-deps = ["JLD2"]
+deps = ["Dates", "JLD2"]
 path = "."
 uuid = "4fec4833-94a8-4ec6-b1ec-1b26e595b69f"
 version = "1.0.0-DEV"
