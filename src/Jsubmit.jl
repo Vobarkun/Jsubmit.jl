@@ -21,7 +21,7 @@ function export_job(path, func, args, kwargs; deduplicate = true, metadata = not
     writejld2 && jldsave("$path.jld2"; args, kwargs, metadata, usecheckpoints)
     if !isnothing(submit)
         dir = abspath(splitdir(path)[1])
-        excludecommand = excludebadgpus ? "--exclude=\$(sinfo -p $partition -o %40G%N | grep 'x\\-10\\|x\\-20\\|x\\-a' | cut -c 41- | paste -sd ',' -)" : ""
+        excludecommand = excludebadgpus ? "--exclude=\$(sinfo -p $partition -o %40G%N | grep 'x\\-10\\|x\\-20\\|4000' | cut -c 41- | paste -sd ',' -)" : ""
         cmd = if submit == "owl"
             `ssh owl5 "source /etc/profile; module load slurm; cd $dir; sbatch $excludecommand $jobname.sh"`
         elseif submit == "moa"
