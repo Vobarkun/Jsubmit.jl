@@ -89,10 +89,11 @@ function runjob(func, path)
     printlog("$(splitext(path)[1]) finished.")
 end
 
-function jobscript(jobname, jobfunc; 
-        narray = nothing, nconcurrent = 1, 
-        exclusive = true, partition = "p16,p20,p32,p40", 
-        ngpus = 0, gputype = "", memory = exclusive ? "0" : "20G"
+function jobscript(jobname, jobfunc;
+        narray = nothing, nconcurrent = 1,
+        exclusive = true, partition = "p16,p20,p32,p40",
+        ngpus = 0, gputype = "", memory = exclusive ? "0" : "20G",
+        ncpus = nothing
     )
     array = isnothing(narray) ? "" : "\n#SBATCH --array=1-$(narray)%$(nconcurrent)"
 
@@ -108,6 +109,7 @@ function jobscript(jobname, jobfunc;
     #SBATCH --time=24:00:00
 
     #SBATCH --nodes=1
+    $(isnothing(ncpus) ? "" : "#SBATCH --cpus-per-task=$ncpus")
     #SBATCH --gpus=$gputype$(isempty(gputype) ? "" : ":")$ngpus
     #SBATCH --mem=$memory
 
