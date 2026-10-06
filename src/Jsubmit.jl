@@ -45,16 +45,18 @@ Write a job for `func(args...; kwargs...)` to `\$path.sh` (the Slurm batch scrip
 - `partition = "p16,p20,p32,p40"`: Slurm partitions to run on.
 - `usecheckpoints = false`: pass the last stored output back to `func` as the `checkpoint`
   keyword, so a resubmitted job continues where the previous one stopped.
+- `storecode = false`: store a [`codesnapshot`](@ref) of `func`'s package, taken when the job
+  starts, as the extra output field `code`.
 - remaining keyword arguments are forwarded to [`jobscript`](@ref).
 """
-function export_job(path, func, args, kwargs; deduplicate = true, metadata = nothing, writejld2 = true, submit = nothing, excludebadgpus = false, partition = "p16,p20,p32,p40", usecheckpoints = false, jobkwargs...)
+function export_job(path, func, args, kwargs; deduplicate = true, metadata = nothing, writejld2 = true, submit = nothing, excludebadgpus = false, partition = "p16,p20,p32,p40", usecheckpoints = false, storecode = true, jobkwargs...)
     if deduplicate path = splitext(numpath("$path.jld2"))[1] end
     jobname = splitdir(path)[2]
  
     println("Writing $path.sh"); flush(stdout)
     export_jobscript("$path.sh", jobname, func; partition, jobkwargs...)
     writejld2 && println("Writing $path.jld2"); flush(stdout)
-    writejld2 && jldsave("$path.jld2"; args, kwargs, metadata, usecheckpoints)
+    writejld2 && jldsave("$path.jld2"; args, kwargs, metadata, usecheckpoints, storecode)
     if !isnothing(submit)
         dir = abspath(splitdir(path)[1])
         excludecommand = excludebadgpus ? "--exclude=\$(sinfo -p $partition -o %40G%N | grep 'x\\-10\\|x\\-20\\|4000' | cut -c 41- | paste -sd ',' -)" : ""
@@ -111,6 +113,37 @@ function outputfields(output::Tuple{Any, NamedTuple})
 end
 
 """
+    codesnapshot(mod) -> Union{Dict{String, String}, Nothing}
+
+Contents of the files under `src/` of the package defining `mod`, keyed by path relative to
+the package root, plus the active environment's `Project.toml`/`Manifest.toml` (under
+`env/`) and, if the package is a git repository, its commit and uncommitted diff (under
+`git/`). Returns `nothing` if `mod` does not belong to a package.
+"""
+function codesnapshot(mod)
+    root = pkgdir(Base.moduleroot(mod))
+    isnothing(root) && return nothing
+    files = Dict{String, String}()
+    for (dir, _, fs) in walkdir(joinpath(root, "src")), f in fs
+        p = joinpath(dir, f)
+        files[relpath(p, root)] = read(p, String)
+    end
+    project = Base.active_project()
+    if !isnothing(project)
+        for f in ("Project.toml", "Manifest.toml")
+            p = joinpath(dirname(project), f)
+            isfile(p) && (files["env/$f"] = read(p, String))
+        end
+    end
+    try
+        files["git/commit"] = readchomp(pipeline(Cmd(`git rev-parse HEAD`; dir = root), stderr = devnull))
+        files["git/diff"] = read(pipeline(Cmd(`git diff HEAD`; dir = root), stderr = devnull), String)
+    catch
+    end
+    return files
+end
+
+"""
     runjob(func, path)
 
 Run the job stored in the JLD2 file `path` and append its result to that same file. This is
@@ -118,7 +151,8 @@ what the generated batch script calls on the compute node.
 
 The arguments are read back from `path` and `func(args...; kwargs...)` is called; if the job
 was exported with `usecheckpoints = true`, the most recent stored output is passed along as
-the `checkpoint` keyword.
+the `checkpoint` keyword. If it was exported with `storecode = true`, a
+[`codesnapshot`](@ref) is taken before `func` is called and stored as the field `code`.
 
 The result is written under a pidlock (`\$path.pid`), so concurrent array tasks do not
 corrupt the file. It is split into datasets by [`outputfields`](@ref) and each one is
@@ -136,7 +170,11 @@ function runjob(func, path)
     end
 
     @load path args kwargs
-    usecheckpoints = jldopen(f -> get(f, "usecheckpoints", false), path, "r")
+    usecheckpoints, storecode = jldopen(path, "r") do f
+        get(f, "usecheckpoints", false), get(f, "storecode", false)
+    end
+    code = storecode ? codesnapshot(parentmodule(func)) : nothing
+    storecode && isnothing(code) && printlog("No package found for $(parentmodule(func)), not storing code")
 
     output = if usecheckpoints
         checkpoint = jldopen(path, "r") do file
@@ -154,6 +192,9 @@ function runjob(func, path)
     FileWatching.mkpidlock(splitext(path)[1] * ".pid") do
         jldopen(path, "a+") do file
             names, vals = outputfields(output)
+            if !isnothing(code)
+                push!(names, "code"); push!(vals, code)
+            end
             suffix = if haskey(ENV, "SLURM_ARRAY_TASK_ID")
                 ENV["SLURM_ARRAY_TASK_ID"]
             else
