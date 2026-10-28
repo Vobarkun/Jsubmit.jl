@@ -156,8 +156,8 @@ the `checkpoint` keyword. If it was exported with `storecode = true`, a
 
 The result is written under a pidlock (`\$path.pid`), so concurrent array tasks do not
 corrupt the file. It is split into datasets by [`outputfields`](@ref) and each one is
-numbered: outside a Slurm array with the first free index shared by all fields, inside one
-with `SLURM_ARRAY_TASK_ID`. Read the results back with [`loadoutputs`](@ref).
+numbered: inside a Slurm array without checkpoints with `SLURM_ARRAY_TASK_ID`, otherwise
+with the first free index shared by all fields. Read the results back with [`loadoutputs`](@ref).
 """
 function runjob(func, path)
     printlog("Processing $(path) on $(gethostname()) with $(Threads.nthreads()) threads")
@@ -195,7 +195,7 @@ function runjob(func, path)
             if !isnothing(code)
                 push!(names, "code"); push!(vals, code)
             end
-            suffix = if haskey(ENV, "SLURM_ARRAY_TASK_ID")
+            suffix = if !usecheckpoints && haskey(ENV, "SLURM_ARRAY_TASK_ID")
                 ENV["SLURM_ARRAY_TASK_ID"]
             else
                 i = 1
@@ -204,9 +204,9 @@ function runjob(func, path)
                 end
                 string(i)
             end
-            for (name, value) in zip(names, vals)
-                key = "$name$suffix"
-                printlog("Saving to $(path)[\"$(key)\"]")
+            savekeys = ["$name$suffix" for name in names]
+            printlog("Saving to $(path)[$(join(savekeys, ", "))]")
+            for (key, value) in zip(savekeys, vals)
                 file[key] = value
             end
         end
