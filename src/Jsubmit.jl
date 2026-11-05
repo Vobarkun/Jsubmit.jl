@@ -10,7 +10,7 @@ back.
 """
 module Jsubmit
 
-using JLD2, Dates, FileWatching
+using JLD2, Dates, FileWatching, Distributed, SlurmClusterManager
 
 """
     numpath(path; sep = "_") -> String
@@ -43,8 +43,8 @@ Write a job for `func(args...; kwargs...)` to `\$path.sh` (the Slurm batch scrip
 - `submit = nothing`: `"owl"` or `"moa"` to `sbatch` the script over ssh on that cluster.
 - `excludebadgpus = false`: exclude known-bad GPU nodes from the submission.
 - `partition = "p16,p20,p32,p40"`: Slurm partitions to run on.
-- `usecheckpoints = false`: pass the last stored output back to `func` as the `checkpoint`
-  keyword, so a resubmitted job continues where the previous one stopped.
+- `usecheckpoints = false`: pass the last stored `checkpoint` field (or, failing that, the
+  last output) back to `func` as the `checkpoint` keyword, so a resubmitted job continues where the previous one stopped.
 - `storecode = false`: store a [`codesnapshot`](@ref) of `func`'s package, taken when the job
   starts, as the extra output field `code`.
 - remaining keyword arguments are forwarded to [`jobscript`](@ref).
@@ -143,15 +143,23 @@ function codesnapshot(mod)
     return files
 end
 
+# (host, UUID, name) of every GPU this process can see, without creating a CUDA context
+gpuinfo(CUDA) = CUDA.functional() ? [(gethostname(), CUDA.uuid(d), CUDA.name(d)) for d in CUDA.devices()] : []
+
 """
-    runjob(func, path)
+    runjob(func, path; distributed = false)
 
 Run the job stored in the JLD2 file `path` and append its result to that same file. This is
 what the generated batch script calls on the compute node.
 
+With `distributed = true` (set by [`jobscript`](@ref) with `ntasks`), one Distributed worker
+is first started per Slurm task with `addprocs(SlurmManager())`, which passes the active
+project and depot on to them, and the package defining `func` is loaded on all of them.
+`func` runs on this process and can use the workers, e.g. through `workers()`.
+
 The arguments are read back from `path` and `func(args...; kwargs...)` is called; if the job
-was exported with `usecheckpoints = true`, the most recent stored output is passed along as
-the `checkpoint` keyword. If it was exported with `storecode = true`, a
+was exported with `usecheckpoints = true`, the most recent stored `checkpoint` field (or, if
+there is none, the most recent `output`) is passed along as the `checkpoint` keyword. If it was exported with `storecode = true`, a
 [`codesnapshot`](@ref) is taken before `func` is called and stored as the field `code`.
 
 The result is written under a pidlock (`\$path.pid`), so concurrent array tasks do not
@@ -159,14 +167,26 @@ corrupt the file. It is split into datasets by [`outputfields`](@ref) and each o
 numbered: inside a Slurm array without checkpoints with `SLURM_ARRAY_TASK_ID`, otherwise
 with the first free index shared by all fields. Read the results back with [`loadoutputs`](@ref).
 """
-function runjob(func, path)
+function runjob(func, path; distributed = false)
     printlog("Processing $(path) on $(gethostname()) with $(Threads.nthreads()) threads")
 
+    if distributed
+        pids = addprocs(SlurmManager())
+        # this process has already loaded (and precompiled) the packages, so the workers only load them
+        remotecall_eval(Main, pids, :(import Jsubmit, $(nameof(Base.moduleroot(parentmodule(func))))))
+        hosts = [remotecall_fetch(gethostname, p) for p in pids]
+        printlog("Started $(length(pids)) workers on", join(["$h ($(count(==(h), hosts)))" for h in unique(hosts)], ", "))
+    end
+
     m = parentmodule(func)
-    if isdefined(m, :CUDA) && m.CUDA.functional()
-        devnames = [m.CUDA.name(d) for d in m.CUDA.devices()]
-        devstrings = ["$(sum(devnames .== n)) × $n" for n in unique(devnames)]
-        printlog("Using $(join(devstrings, ", "))")
+    if isdefined(m, :CUDA)
+        # GPUs that several workers on a node can see are counted once, by their UUID
+        gpus = unique(reduce(vcat, asyncmap(p -> remotecall_fetch(gpuinfo, p, m.CUDA), distributed ? workers() : [myid()])))
+        for host in unique(first.(gpus))
+            devnames = [name for (h, _, name) in gpus if h == host]
+            devstrings = ["$(sum(devnames .== n)) × $n" for n in unique(devnames)]
+            printlog("Using $(join(devstrings, ", "))$(distributed ? " on $host" : "")")
+        end
     end
 
     @load path args kwargs
@@ -178,11 +198,14 @@ function runjob(func, path)
 
     output = if usecheckpoints
         checkpoint = jldopen(path, "r") do file
-            is = [parse(Int, k[length("output")+1:end]) for k in keys(file) if occursin(r"^output\d+$", k)]
-            isempty(is) && return nothing
-            i = maximum(is)
-            printlog("Resuming from $(path)[\"output$(i)\"]")
-            return file["output$i"]
+            for name in ("checkpoint", "output")
+                is = [parse(Int, m[1]) for m in (match(Regex("^$name(\\d+)\$"), k) for k in keys(file)) if !isnothing(m)]
+                isempty(is) && continue
+                i = maximum(is)
+                printlog("Resuming from $(path)[\"$name$(i)\"]")
+                return file["$name$i"]
+            end
+            return nothing
         end
         func(args...; checkpoint, kwargs...)
     else
@@ -222,40 +245,73 @@ Build the Slurm batch script that runs `Jsubmit.runjob(jobfunc, "\$jobname.jld2"
 `jobfunc` addressed through its parent module, so that module must be importable from the
 job's project directory.
 
+By default the job is a single task on one node. With `ntasks`, it gets that many tasks
+(e.g. one per GPU), placed by Slurm on however many nodes it takes. Julia then runs once in
+the batch step rather than under `srun`, and [`runjob`](@ref) starts a Distributed worker on
+each task before calling `jobfunc`.
+
 # Keyword arguments
 - `narray = nothing`: number of array tasks; `nothing` submits a single job. Array jobs log
   with `--open-mode=append`.
 - `nconcurrent = 1`: how many array tasks may run at once. More than one gives every task
   its own log file, named after its array index.
-- `exclusive = true`: request whole nodes.
+- `ntasks = nothing`: number of Slurm tasks; `nothing` runs a single task on one node.
+- `nodes = nothing`: with `ntasks`, the node count or range (e.g. `"1-4"`) to spread the
+  tasks over; `nothing` leaves it to Slurm.
+- `exclusive = isnothing(ntasks)`: request whole nodes. With `ntasks` this reserves every
+  node the job touches.
 - `partition = "p16,p20,p32,p40"`: Slurm partitions to run on.
-- `ngpus = 0`, `gputype = ""`: GPU count and, optionally, the type to request.
-- `memory = exclusive ? "0" : "20G"`: memory per node; `"0"` means all of it.
-- `ncpus = nothing`: CPUs per task; `nothing` leaves the Slurm default.
+- `ngpus = isnothing(ntasks) ? 0 : 1`: GPU count, per task with `ntasks`.
+- `gputype = ""`: optionally, the GPU type to request.
+- `memory = exclusive ? "0" : "20G"`: memory per node; `"0"` means all of it. With `ntasks`
+  and not `exclusive`, memory per GPU (or per CPU without GPUs).
+- `ncpus = nothing`: CPUs per task; `nothing` leaves the Slurm default (1 with `ntasks`).
 """
 function jobscript(jobname, jobfunc;
         narray = nothing, nconcurrent = 1,
-        exclusive = true, partition = "p16,p20,p32,p40",
-        ngpus = 0, gputype = "", memory = exclusive ? "0" : "20G",
+        ntasks = nothing, nodes = nothing,
+        exclusive = isnothing(ntasks), partition = "p16,p20,p32,p40",
+        ngpus = isnothing(ntasks) ? 0 : 1, gputype = "", memory = exclusive ? "0" : "20G",
         ncpus = nothing
     )
     array = isnothing(narray) ? "" : "\n#SBATCH --array=1-$(narray)%$(nconcurrent)"
+    gpus = "$gputype$(isempty(gputype) ? "" : ":")$ngpus"
+
+    resources = if isnothing(ntasks)
+        """
+        #SBATCH --nodes=1
+        $(isnothing(ncpus) ? "" : "#SBATCH --cpus-per-task=$ncpus")
+        #SBATCH --gpus=$gpus
+        #SBATCH --mem=$memory"""
+    else
+        memflag = exclusive ? "mem" : ngpus > 0 ? "mem-per-gpu" : "mem-per-cpu"
+        """
+        #SBATCH --ntasks=$ntasks
+        $(isnothing(nodes) ? "" : "#SBATCH --nodes=$nodes")
+        $(isnothing(ncpus) ? "" : "#SBATCH --cpus-per-task=$ncpus")
+        $(ngpus > 0 ? "#SBATCH --gpus-per-task=$gpus" : "")
+        #SBATCH --$memflag=$memory"""
+    end
 
     function_string = string(nameof(jobfunc))
     module_string = string(parentmodule(jobfunc))
-    command = "import Jsubmit, $module_string; Jsubmit.runjob($module_string.$function_string, \"$jobname.jld2\")"
+    command = "import Jsubmit, $module_string; Jsubmit.runjob($module_string.$function_string, \"$jobname.jld2\"$(isnothing(ntasks) ? "" : "; distributed = true"))"
+    # With ntasks, Julia runs in the batch step and the srun that starts its workers is the only
+    # one. Since Slurm 22.05, that srun no longer inherits --cpus-per-task from sbatch.
+    launch = if isnothing(ntasks)
+        "srun julia --project=@. --threads=auto -e \'$command\'"
+    else
+        "$(isnothing(ncpus) ? "" : "export SRUN_CPUS_PER_TASK=$ncpus\n")julia --project=@. --threads=auto -e \'$command\'"
+    end
 
     """
     #!/bin/bash
 
-    #SBATCH --partition $partition    
+    #SBATCH --partition $partition
     #SBATCH --dependency=singleton
     #SBATCH --time=24:00:00
 
-    #SBATCH --nodes=1
-    $(isnothing(ncpus) ? "" : "#SBATCH --cpus-per-task=$ncpus")
-    #SBATCH --gpus=$gputype$(isempty(gputype) ? "" : ":")$ngpus
-    #SBATCH --mem=$memory
+    $resources
 
     #SBATCH --job-name=$jobname
     #SBATCH --mail-type=NONE
@@ -265,7 +321,7 @@ function jobscript(jobname, jobfunc;
 
     $(exclusive ? "#SBATCH --exclusive\n" : "")$array
     
-    srun julia --project=@. --threads=auto -e \'$command\'
+    $launch
     """
 end
 
