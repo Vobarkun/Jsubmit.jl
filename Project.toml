@@ -1,6 +1,6 @@
 name = "Jsubmit"
 uuid = "4fec4833-94a8-4ec6-b1ec-1b26e595b69f"
-version = "1.0.0-DEV"
+version = "1.0.0"
 authors = ["Steffen Schultze"]
 
 [deps]
