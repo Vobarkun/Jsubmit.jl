@@ -331,10 +331,12 @@ end
 Load every result [`runjob`](@ref) stored in the JLD2 file `path`, ordered by their index.
 Pass `name` (a `String` or `Symbol`) to read one of the extra named fields a job returned
 instead of the plain output, e.g. `loadoutputs(path; name = :loss)`.
+Pass `typemap` to remap stored types when loading files written with older struct layouts,
+e.g. `loadoutputs(path; typemap = NPhotons.COMPAT_TYPEMAP)`.
 """
-function loadoutputs(path; name = "output")
+function loadoutputs(path; name = "output", typemap = Dict{String,Any}())
     name = string(name)
-    jldopen(path, "r") do file
+    jldopen(path, "r"; typemap) do file
         ks = filter(k -> k == name || occursin(Regex("^$(name)\\d+\$"), k), keys(file))
         sortkey(k) = k == name ? -1 : parse(Int, k[length(name)+1:end])
         return [file[k] for k in sort(ks, by=sortkey)]
